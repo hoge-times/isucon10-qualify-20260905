@@ -1,0 +1,14 @@
+*.prof
+*.pb
+*.pb.gz
+/memo
+hoge.txt
+.DS_Store
+/go/isuumo
+# debian-sys-maint の平文パスワードを含むので commit しない
+/mysql/debian.cnf
+/mysql/data
+# frontend はビルド済み資産と依存で 1.1GB あるためリポジトリには入れない(ディスクには残す)
+/frontend/node_modules
+/frontend/out
+/frontend/public/images
