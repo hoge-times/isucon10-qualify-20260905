@@ -4,9 +4,11 @@ service = isuumo.go.service
 godir = go
 mysql_auth = 
 
-# 構成: i1 = web(nginx + アプリ) / i2 = MySQL 専有 / i3 = 予備
+# 構成: i1 = web(nginx + アプリ) / i2 = chair の MySQL / i3 = estate の MySQL
+# chair と estate は JOIN もまたぐトランザクションも無いのでテーブル単位で分けている。
 web_host = i1
-db_host = i2
+chair_db_host = i2
+estate_db_host = i3
 
 # ベンチ(練習: i1 で実行 / 本戦: ポータルから)
 .PHONY: bench
@@ -17,7 +19,8 @@ bench:
 .PHONY: prepare
 prepare:
 	ssh isucon@${web_host} -A 'cd isuumo/webapp && make re'
-	ssh isucon@${db_host} -A 'cd isuumo/webapp && make dbre'
+	ssh isucon@${chair_db_host} -A 'cd isuumo/webapp && make dbre'
+	ssh isucon@${estate_db_host} -A 'cd isuumo/webapp && make dbre'
 	echo "正常に make prepare が完了しました"
 
 # web ホスト(${web_host})で実行する。アプリと nginx の再起動。
@@ -27,7 +30,7 @@ re:
 	make nrestart
 	echo "正常に make re が完了しました"
 
-# DB ホスト(${db_host})で実行する。MySQL の再起動とスロークエリログの初期化。
+# DB ホスト(${chair_db_host} / ${estate_db_host})で実行する。MySQL の再起動とスロークエリログの初期化。
 .PHONY: dbre
 dbre:
 	make mrestart
@@ -87,8 +90,8 @@ define upload
 	ssh isucon@$(1) 'sudo systemctl status ${service} --no-pager'
 endef
 
-# upload2 / upload3 は現構成では通常使わない。
-# i2 は MySQL 専有なのでアプリを動かしていない。i3 は別メンバーが使用中なので触らないこと。
+# upload2 / upload3 は現構成では通常使わない。i2 / i3 はどちらも MySQL 専有で
+# アプリを動かしていないため、バイナリの配布先は web ホストだけでよい。
 .PHONY: upload1 upload2 upload3 all zenbu
 upload1: build
 	$(call upload,i1)
