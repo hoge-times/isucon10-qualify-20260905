@@ -26,9 +26,12 @@ import (
 const Limit = 20
 const NazotteLimit = 50
 
-// estate を SELECT * で読むと生成列 location(POINT)まで返り、Estate 構造体に
-// 割り当て先が無いため sqlx がエラーになる。読む列を明示する。
+// SELECT * で読むと生成列(estate の location、両テーブルの検索バケット)まで返り、
+// 構造体に割り当て先が無いため sqlx がエラーになる。読む列を明示する。
 const estateColumns = "id, name, description, thumbnail, address, latitude, longitude, rent, door_height, door_width, features, popularity, popularity_desc"
+
+// chair も検索バケットの生成列を持つようになったため、estate と同じ理由で列を明示する。
+const chairColumns = "id, name, description, thumbnail, price, height, width, depth, color, features, kind, popularity, popularity_desc, stock"
 
 // chair と estate は JOIN もまたぐトランザクションも無いので、テーブル単位で
 // 別サーバーの MySQL に載せている。接続先は env.sh の MYSQL_CHAIR_HOST /
@@ -76,7 +79,7 @@ func getChairByID(id int64) (Chair, error) {
 		return chair, nil
 	}
 
-	if err := chairDB.Get(&chair, "SELECT * FROM chair WHERE id = ?", id); err != nil {
+	if err := chairDB.Get(&chair, "SELECT "+chairColumns+" FROM chair WHERE id = ?", id); err != nil {
 		return Chair{}, err
 	}
 
@@ -335,6 +338,42 @@ func init() {
 		os.Exit(1)
 	}
 	json.Unmarshal(jsonText, &estateSearchCondition)
+
+	// 0_Schema.sql の *_bucket 生成列は境界値を直書きしている。fixture とズレたまま
+	// 起動すると検索結果が静かに変わって失格するので、ここで突き合わせて落とす。
+	validateBucketBoundaries("chair.price", chairSearchCondition.Price, []int64{3000, 6000, 9000, 12000, 15000})
+	validateBucketBoundaries("chair.height", chairSearchCondition.Height, []int64{80, 110, 150})
+	validateBucketBoundaries("chair.width", chairSearchCondition.Width, []int64{80, 110, 150})
+	validateBucketBoundaries("chair.depth", chairSearchCondition.Depth, []int64{80, 110, 150})
+	validateBucketBoundaries("estate.rent", estateSearchCondition.Rent, []int64{50000, 100000, 150000})
+	validateBucketBoundaries("estate.doorHeight", estateSearchCondition.DoorHeight, []int64{80, 110, 150})
+	validateBucketBoundaries("estate.doorWidth", estateSearchCondition.DoorWidth, []int64{80, 110, 150})
+}
+
+// validateBucketBoundaries は fixture のレンジ定義が bounds の境界値どおりであることを確かめる。
+// bounds はバケットの区切り(半開区間 [min, max) の切れ目)で、バケット数は len(bounds)+1。
+// 先頭の min と末尾の max は無制限を表す -1、ID は配列の添字と一致していなければならない
+// (getRange が cond.Ranges[rangeID] を引くため)。
+func validateBucketBoundaries(name string, cond RangeCondition, bounds []int64) {
+	if len(cond.Ranges) != len(bounds)+1 {
+		fmt.Printf("bucket mismatch %v: fixture has %v ranges, 0_Schema.sql assumes %v\n",
+			name, len(cond.Ranges), len(bounds)+1)
+		os.Exit(1)
+	}
+	for i, r := range cond.Ranges {
+		wantMin, wantMax := int64(-1), int64(-1)
+		if i > 0 {
+			wantMin = bounds[i-1]
+		}
+		if i < len(bounds) {
+			wantMax = bounds[i]
+		}
+		if r.ID != int64(i) || r.Min != wantMin || r.Max != wantMax {
+			fmt.Printf("bucket mismatch %v[%v]: fixture {id:%v min:%v max:%v}, 0_Schema.sql assumes {id:%v min:%v max:%v}\n",
+				name, i, r.ID, r.Min, r.Max, i, wantMin, wantMax)
+			os.Exit(1)
+		}
+	}
 }
 
 func main() {
@@ -550,14 +589,10 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairPrice.Min != -1 {
-			conditions = append(conditions, "price >= ?")
-			params = append(params, chairPrice.Min)
-		}
-		if chairPrice.Max != -1 {
-			conditions = append(conditions, "price < ?")
-			params = append(params, chairPrice.Max)
-		}
+		// レンジ条件ではなくバケット等値にする。ORDER BY popularity_desc, id を
+		// インデックス順で解くには、手前の条件が全て「定数への等値」である必要がある。
+		conditions = append(conditions, "price_bucket = ?")
+		params = append(params, chairPrice.ID)
 	}
 
 	if c.QueryParam("heightRangeId") != "" {
@@ -567,14 +602,9 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairHeight.Min != -1 {
-			conditions = append(conditions, "height >= ?")
-			params = append(params, chairHeight.Min)
-		}
-		if chairHeight.Max != -1 {
-			conditions = append(conditions, "height < ?")
-			params = append(params, chairHeight.Max)
-		}
+		// バケット等値。理由は 0_Schema.sql の *_bucket のコメント。
+		conditions = append(conditions, "height_bucket = ?")
+		params = append(params, chairHeight.ID)
 	}
 
 	if c.QueryParam("widthRangeId") != "" {
@@ -584,14 +614,9 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairWidth.Min != -1 {
-			conditions = append(conditions, "width >= ?")
-			params = append(params, chairWidth.Min)
-		}
-		if chairWidth.Max != -1 {
-			conditions = append(conditions, "width < ?")
-			params = append(params, chairWidth.Max)
-		}
+		// バケット等値。理由は 0_Schema.sql の *_bucket のコメント。
+		conditions = append(conditions, "width_bucket = ?")
+		params = append(params, chairWidth.ID)
 	}
 
 	if c.QueryParam("depthRangeId") != "" {
@@ -601,14 +626,9 @@ func searchChairs(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if chairDepth.Min != -1 {
-			conditions = append(conditions, "depth >= ?")
-			params = append(params, chairDepth.Min)
-		}
-		if chairDepth.Max != -1 {
-			conditions = append(conditions, "depth < ?")
-			params = append(params, chairDepth.Max)
-		}
+		// バケット等値。理由は 0_Schema.sql の *_bucket のコメント。
+		conditions = append(conditions, "depth_bucket = ?")
+		params = append(params, chairDepth.ID)
 	}
 
 	if c.QueryParam("kind") != "" {
@@ -633,7 +653,9 @@ func searchChairs(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	conditions = append(conditions, "stock > 0")
+	// stock > 0 のままだとレンジ条件になり、後続の popularity_desc を
+	// ORDER BY に使えなくなる。生成列 in_stock で等値にする。
+	conditions = append(conditions, "in_stock = 1")
 
 	page, err := strconv.Atoi(c.QueryParam("page"))
 	if err != nil {
@@ -647,7 +669,7 @@ func searchChairs(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	searchQuery := "SELECT * FROM chair WHERE "
+	searchQuery := "SELECT " + chairColumns + " FROM chair WHERE "
 	countQuery := "SELECT COUNT(*) FROM chair WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
@@ -702,7 +724,7 @@ func buyChair(c echo.Context) error {
 	defer tx.Rollback()
 
 	var chair Chair
-	err = tx.QueryRowx("SELECT * FROM chair WHERE id = ? AND stock > 0 FOR UPDATE", id).StructScan(&chair)
+	err = tx.QueryRowx("SELECT "+chairColumns+" FROM chair WHERE id = ? AND stock > 0 FOR UPDATE", id).StructScan(&chair)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Echo().Logger.Infof("buyChair chair id \"%v\" not found", id)
@@ -737,7 +759,7 @@ func getChairSearchCondition(c echo.Context) error {
 
 func getLowPricedChair(c echo.Context) error {
 	var chairs []Chair
-	query := `SELECT * FROM chair WHERE stock > 0 ORDER BY price ASC, id ASC LIMIT ?`
+	query := "SELECT " + chairColumns + " FROM chair WHERE stock > 0 ORDER BY price ASC, id ASC LIMIT ?"
 	err := chairDB.Select(&chairs, query, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -850,14 +872,10 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if doorHeight.Min != -1 {
-			conditions = append(conditions, "door_height >= ?")
-			params = append(params, doorHeight.Min)
-		}
-		if doorHeight.Max != -1 {
-			conditions = append(conditions, "door_height < ?")
-			params = append(params, doorHeight.Max)
-		}
+		// レンジ条件ではなくバケット等値にする。ORDER BY popularity_desc, id を
+		// インデックス順で解くには、手前の条件が全て「定数への等値」である必要がある。
+		conditions = append(conditions, "dh_bucket = ?")
+		params = append(params, doorHeight.ID)
 	}
 
 	if c.QueryParam("doorWidthRangeId") != "" {
@@ -867,14 +885,9 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if doorWidth.Min != -1 {
-			conditions = append(conditions, "door_width >= ?")
-			params = append(params, doorWidth.Min)
-		}
-		if doorWidth.Max != -1 {
-			conditions = append(conditions, "door_width < ?")
-			params = append(params, doorWidth.Max)
-		}
+		// バケット等値。理由は 0_Schema.sql の *_bucket のコメント。
+		conditions = append(conditions, "dw_bucket = ?")
+		params = append(params, doorWidth.ID)
 	}
 
 	if c.QueryParam("rentRangeId") != "" {
@@ -884,14 +897,9 @@ func searchEstates(c echo.Context) error {
 			return c.NoContent(http.StatusBadRequest)
 		}
 
-		if estateRent.Min != -1 {
-			conditions = append(conditions, "rent >= ?")
-			params = append(params, estateRent.Min)
-		}
-		if estateRent.Max != -1 {
-			conditions = append(conditions, "rent < ?")
-			params = append(params, estateRent.Max)
-		}
+		// バケット等値。理由は 0_Schema.sql の *_bucket のコメント。
+		conditions = append(conditions, "rent_bucket = ?")
+		params = append(params, estateRent.ID)
 	}
 
 	if c.QueryParam("features") != "" {
