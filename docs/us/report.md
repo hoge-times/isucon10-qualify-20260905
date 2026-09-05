@@ -85,7 +85,9 @@ CSV入稿はマニュアルに記載されるデータ供給処理で、今回�
 
 ## 根拠と記録
 
-- 操作記録（入力、操作順、対象ID、成功表示）：[operation-log.md](operation-log.md) — 20260905-trial-01 が US-01・US-02、20260905-trial-02 が US-03〜US-06
+- 操作記録（入力、操作順、対象ID、成功表示）
+  - [20260905-trial-01（US-01、US-02）](20260905-trial-01/operation-log.md)
+  - [20260905-trial-02（US-03〜US-06）](20260905-trial-02/operation-log.md)
 - 採点・仕様：[予選マニュアル](../isucon10_qualify_manual.md)、[環境情報](../kickoff.md)
 - トップページ：[index](../../frontend/src/pages/index.tsx)
 - イス検索UI：[chair/search](../../frontend/src/pages/chair/search/index.tsx)
