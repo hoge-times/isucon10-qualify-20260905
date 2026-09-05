@@ -40,7 +40,9 @@ skip-external-locking
 #
 # Instead of skip-networking the default is now to listen only on
 # localhost which is more compatible and is not less secure.
-bind-address            = 127.0.0.1
+# i2 を MySQL 専有ホストにしたので、i1(web) から接続できるよう全 IF で LISTEN する。
+# 練習環境は VPC 内に閉じており、Security Group で 3306 を絞っている。
+bind-address            = 0.0.0.0
 #
 # * Fine Tuning
 #
