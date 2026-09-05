@@ -368,9 +368,6 @@ func main() {
 	if err != nil {
 		e.Logger.Fatalf("DB connection failed : %v", err)
 	}
-	// estate に生成カラム location を追加したため、SELECT * に含まれる location を
-	// Estate struct にマッピングできず sqlx がエラーになる。Unsafe にして未マップ列を無視する。
-	db = db.Unsafe()
 	db.SetMaxOpenConns(10)
 	defer db.Close()
 
