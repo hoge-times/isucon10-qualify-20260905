@@ -55,6 +55,10 @@ mrestart:
 	sudo rm /var/log/mysql/slow.log
 	sudo mysqladmin flush-logs ${mysql_auth}
 	sudo systemctl restart mysql
+	# 再起動直後は接続を受け付けないことがある。下の set global が落ちると make が
+	# そこで中断し、prepare の残り(別の DB ホスト)が実行されないまま起動途中の
+	# MySQL にベンチが走って初期化に失敗する。応答するまで待つ。
+	for i in $$(seq 1 30); do sudo mysqladmin ping ${mysql_auth} >/dev/null 2>&1 && break; sleep 1; done
 	sudo systemctl status mysql --no-pager
 	echo "set global slow_query_log = 1;" | sudo mysql ${mysql_auth}
 	echo "set global slow_query_log_file = '/var/log/mysql/slow.log';" | sudo mysql ${mysql_auth}
