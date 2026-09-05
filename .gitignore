@@ -13,3 +13,8 @@ hoge.txt
 /frontend/out
 /frontend/public/images
 app-map-raw/
+# nginx のアクセスログ ON/OFF を切り替える実行時ファイル(make nlogon / nlogoff が置く)。
+# /etc/nginx は本ディレクトリへの symlink なので、追跡すると実行時の切り替えで
+# サーバー側の作業ツリーが汚れて git pull が失敗する。
+/nginx/access-log.d/*
+!/nginx/access-log.d/.gitkeep
