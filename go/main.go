@@ -26,6 +26,10 @@ import (
 const Limit = 20
 const NazotteLimit = 50
 
+// estate を SELECT * で読むと生成列 location(POINT)まで返り、Estate 構造体に
+// 割り当て先が無いため sqlx がエラーになる。読む列を明示する。
+const estateColumns = "id, name, description, thumbnail, address, latitude, longitude, rent, door_height, door_width, features, popularity, popularity_desc"
+
 var db *sqlx.DB
 var mySQLConnectionData *MySQLConnectionEnv
 var chairSearchCondition ChairSearchCondition
@@ -99,7 +103,7 @@ func getEstateByID(id int64) (Estate, error) {
 		return estate, nil
 	}
 
-	if err := db.Get(&estate, "SELECT * FROM estate WHERE id = ?", id); err != nil {
+	if err := db.Get(&estate, "SELECT "+estateColumns+" FROM estate WHERE id = ?", id); err != nil {
 		return Estate{}, err
 	}
 
@@ -871,7 +875,7 @@ func searchEstates(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	searchQuery := "SELECT * FROM estate WHERE "
+	searchQuery := "SELECT " + estateColumns + " FROM estate WHERE "
 	countQuery := "SELECT COUNT(*) FROM estate WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
@@ -901,7 +905,7 @@ func searchEstates(c echo.Context) error {
 
 func getLowPricedEstate(c echo.Context) error {
 	estates := make([]Estate, 0, Limit)
-	query := `SELECT * FROM estate ORDER BY rent ASC, id ASC LIMIT ?`
+	query := "SELECT " + estateColumns + " FROM estate ORDER BY rent ASC, id ASC LIMIT ?"
 	err := db.Select(&estates, query, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -938,7 +942,7 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	dims := []int64{chair.Width, chair.Height, chair.Depth}
 	sort.Slice(dims, func(i, j int) bool { return dims[i] < dims[j] })
 	d1, d2 := dims[0], dims[1]
-	query := `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?`
+	query := "SELECT " + estateColumns + " FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
 	err = db.Select(&estates, query, d1, d2, d2, d1, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -967,7 +971,7 @@ func searchEstateNazotte(c echo.Context) error {
 	// 以前は bounding box で N 件取得 → 1件ずつ ST_Contains を N 回実行する N+1 だった。
 	// 並び順は popularity_desc(= -popularity)の昇順で、従来の popularity DESC と同値。
 	estatesInPolygon := []Estate{}
-	query := fmt.Sprintf(`SELECT * FROM estate WHERE ST_Contains(ST_PolygonFromText(%s), location) ORDER BY popularity_desc ASC, id ASC LIMIT ?`, coordinates.coordinatesToText())
+	query := fmt.Sprintf("SELECT "+estateColumns+" FROM estate WHERE ST_Contains(ST_PolygonFromText(%s), location) ORDER BY popularity_desc ASC, id ASC LIMIT ?", coordinates.coordinatesToText())
 	err = db.Select(&estatesInPolygon, query, NazotteLimit)
 	if err == sql.ErrNoRows {
 		return c.JSON(http.StatusOK, EstateSearchResponse{Count: 0, Estates: []Estate{}})
