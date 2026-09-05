@@ -240,3 +240,68 @@ paths := []string{"0_Schema.sql", "1_DummyEstateData.sql", "2_DummyChairData.sql
 各段でベンチを回して pass とスコアを確認する（`CLAUDE.md` のベンチ必須ルール）。
 
 次回のベンチ計測では **pt-query-digest の全文**（`~/pt.log`）を確認すること。Issue #2 に貼られているのは先頭 300 行だけで、Exec time の **51.2%（214.7 秒）を占める MISC 499 items** の内訳が見えていない。
+
+---
+
+## 8. 段 A 適用後の実測（2026-09-05 06:39、ブランチ `perf/mysql-index-phase-a`）
+
+`mysql/db/0_Schema.sql` の `CREATE TABLE` に `idx_price` / `idx_rent` / `idx_lat_lon` を追加し、`make re` 後にベンチを 1 回走行。
+
+```
+{"pass":true,"score":1294,"reason":"OK","language":"go"}
+最終的な負荷レベル: 7
+```
+
+| 指標 | 段 A 前 | 段 A 後 | 差 |
+|---|---:|---:|---|
+| スコア | 1,096 | **1,294** | **+198（+18.1%）** |
+| 最終負荷レベル | 5 | **7** | +2 |
+| 総クエリ数 | 245.00k | 323.37k | +32.0% |
+| **Rows examine 合計** | 359.80M | **259.02M** | **−28.0%** |
+| **Rows examine / クエリ** | 1.50k | **839.90** | **−44.0%** |
+| Exec time 合計 | 419 秒 | 419 秒 | ±0（2 vCPU が飽和したまま、こなす量が増えた） |
+| `POST /initialize` | 1.560 秒 | 1.776 秒 | +0.216 秒（タイムアウト 30 秒に対し余裕） |
+
+### EXPLAIN の変化（実機）
+
+| クエリ | 前 | 後 |
+|---|---|---|
+| `chair WHERE stock>0 ORDER BY price ASC,id ASC LIMIT 20` | ALL / 29,246 行 / filesort | **index / `idx_price` / 20 行 / filesort なし** |
+| `estate ORDER BY rent ASC,id ASC LIMIT 20` | ALL / 29,271 行 / filesort | **index / `idx_rent` / 20 行 / filesort なし** |
+| `SELECT COUNT(*) FROM estate WHERE rent>=? AND rent<?` | ALL / 29,271 行 | **range / `idx_rent` / 9,654 行 / `Using index`（カバリング）** |
+| `estate WHERE latitude<=? … longitude>=? ORDER BY popularity DESC,id ASC` | ALL / 29,271 行 | **range / `idx_lat_lon` / 506 行 / `Using index condition`** |
+| `chair WHERE price>=? AND price<? AND stock>0 ORDER BY popularity DESC,id ASC LIMIT 10` | ALL / 29,246 行 | **range / `idx_price` / 5,153 行** |
+| `estate WHERE rent>=? AND rent<? ORDER BY popularity DESC,id ASC LIMIT 25 OFFSET 25` | ALL / 29,271 行 | **ALL / 32,004 行（変わらず）** ← §8-1 |
+
+### digest 上位からの消滅
+
+| 段 A 前 | 段 A 後 |
+|---|---|
+| rank 1 `chair WHERE stock>0 ORDER BY price…`（934 回 / 26.2 秒） | **上位 20 から消滅** |
+| rank 3 `estate ORDER BY rent…`（934 回 / 22.1 秒） | **上位 20 から消滅** |
+| rank 7 nazotte の bbox（283 回 / 10.9 秒） | **上位 20 から消滅** |
+| rank 6 `COUNT(*) … rent レンジ`（532 回 / 12.6 秒） | rank 14（671 回 / **4.13 秒**）＝ 呼び出し +26% で **−67%** |
+
+alp でも `low_priced` 2 本が落ちている（リクエスト数は増えているのに合計時間が半減）。
+
+| エンドポイント | 前 COUNT / SUM | 後 COUNT / SUM |
+|---|---|---|
+| `GET /api/chair/low_priced` | 934 / 36.45 秒 | 1,134 / **19.80 秒** |
+| `GET /api/estate/low_priced` | 934 / 32.01 秒 | 1,134 / **18.50 秒** |
+
+### 8-1. 効かなかったもの: `estate` 検索本体の `SELECT *`
+
+`SELECT * FROM estate WHERE rent >= ? AND rent < ? ORDER BY popularity DESC, id ASC LIMIT 25 OFFSET 25` は `idx_rent` が `possible_keys` に出るのに **optimizer が選ばず ALL のまま**。フィルタ率 30%（9,654 行）だと「インデックスを辿って 9,654 行をランダムに行本体へ引きに行く」より「32,000 行を順に読む」ほうが安いと判断されている。5.7 の見積もりとして妥当で、`SELECT *` である以上カバリングにもできない。
+
+digest でも per-call 0.0320 秒 → 0.0316 秒とほぼ変化なし（現在の rank 2、671 回 / 21.2 秒）。**これは §4-1 の `popularity_desc` 生成列（段 4）で ORDER BY 側を索引化するのが本筋**で、フィルタ用インデックスでは解けない。
+
+### 8-2. 新しいボトルネック
+
+| rank | クエリ | 回数 | 時間 | 対応する段 |
+|---:|---|---:|---:|---|
+| 1 | `recommended_estate` の OR 6 項 + `ORDER BY popularity DESC` | 638 | 31.1 秒 (7.4%) | 段 4（生成列）＋ §4-2（OR を 2 項に簡約） |
+| 2 | `estate` 検索の `SELECT *`（§8-1） | 671 | 21.2 秒 (5.1%) | 段 4 |
+| 3 | ADMIN PREPARE | 107,564 | 17.3 秒 (4.1%) | 段 2（`interpolateParams=true`） |
+| 4 | nazotte の `ST_Contains` N+1 | 68,515 | 12.5 秒 (3.0%) | 段 5（1 クエリ化） |
+
+`POST /api/estate/nazotte` は 346 リクエスト中 49 件が 2 秒のタイムアウトに当たっている（前回は 283 中 27 件）。bbox 自体は 506 行まで落ちたが、その後の **1 件ずつ `ST_Contains` を投げる N+1**（平均 198 回/リクエスト）が残っているため、負荷レベルが上がったぶん悪化した。段 5 の優先度が上がった。
