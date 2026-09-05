@@ -26,6 +26,10 @@ import (
 const Limit = 20
 const NazotteLimit = 50
 
+// estate を SELECT * で読むと生成列 location(POINT)まで返り、Estate 構造体に
+// 割り当て先が無いため sqlx がエラーになる。読む列を明示する。
+const estateColumns = "id, name, description, thumbnail, address, latitude, longitude, rent, door_height, door_width, features, popularity, popularity_desc"
+
 var db *sqlx.DB
 var mySQLConnectionData *MySQLConnectionEnv
 var chairSearchCondition ChairSearchCondition
@@ -99,7 +103,7 @@ func getEstateByID(id int64) (Estate, error) {
 		return estate, nil
 	}
 
-	if err := db.Get(&estate, "SELECT * FROM estate WHERE id = ?", id); err != nil {
+	if err := db.Get(&estate, "SELECT "+estateColumns+" FROM estate WHERE id = ?", id); err != nil {
 		return Estate{}, err
 	}
 
@@ -868,7 +872,7 @@ func searchEstates(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	searchQuery := "SELECT * FROM estate WHERE "
+	searchQuery := "SELECT " + estateColumns + " FROM estate WHERE "
 	countQuery := "SELECT COUNT(*) FROM estate WHERE "
 	searchCondition := strings.Join(conditions, " AND ")
 	limitOffset := " ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ?"
@@ -898,7 +902,7 @@ func searchEstates(c echo.Context) error {
 
 func getLowPricedEstate(c echo.Context) error {
 	estates := make([]Estate, 0, Limit)
-	query := `SELECT * FROM estate ORDER BY rent ASC, id ASC LIMIT ?`
+	query := "SELECT " + estateColumns + " FROM estate ORDER BY rent ASC, id ASC LIMIT ?"
 	err := db.Select(&estates, query, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -935,7 +939,7 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	dims := []int64{chair.Width, chair.Height, chair.Depth}
 	sort.Slice(dims, func(i, j int) bool { return dims[i] < dims[j] })
 	d1, d2 := dims[0], dims[1]
-	query := `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?`
+	query := "SELECT " + estateColumns + " FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?"
 	err = db.Select(&estates, query, d1, d2, d2, d1, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -960,44 +964,21 @@ func searchEstateNazotte(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	b := coordinates.getBoundingBox()
-	estatesInBoundingBox := []Estate{}
-	query := `SELECT * FROM estate WHERE latitude <= ? AND latitude >= ? AND longitude <= ? AND longitude >= ? ORDER BY popularity_desc ASC, id ASC`
-	err = db.Select(&estatesInBoundingBox, query, b.BottomRightCorner.Latitude, b.TopLeftCorner.Latitude, b.BottomRightCorner.Longitude, b.TopLeftCorner.Longitude)
+	// geometry カラム(location) + SPATIAL INDEX により、なぞって検索を1クエリで完結させる。
+	// 以前は bounding box で N 件取得 → 1件ずつ ST_Contains を N 回実行する N+1 だった。
+	// 並び順は popularity_desc(= -popularity)の昇順で、従来の popularity DESC と同値。
+	estatesInPolygon := []Estate{}
+	query := fmt.Sprintf("SELECT "+estateColumns+" FROM estate WHERE ST_Contains(ST_PolygonFromText(%s), location) ORDER BY popularity_desc ASC, id ASC LIMIT ?", coordinates.coordinatesToText())
+	err = db.Select(&estatesInPolygon, query, NazotteLimit)
 	if err == sql.ErrNoRows {
-		c.Echo().Logger.Infof("select * from estate where latitude ...", err)
 		return c.JSON(http.StatusOK, EstateSearchResponse{Count: 0, Estates: []Estate{}})
 	} else if err != nil {
 		c.Echo().Logger.Errorf("database execution error : %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	estatesInPolygon := []Estate{}
-	for _, estate := range estatesInBoundingBox {
-		validatedEstate := Estate{}
-
-		point := fmt.Sprintf("'POINT(%f %f)'", estate.Latitude, estate.Longitude)
-		query := fmt.Sprintf(`SELECT * FROM estate WHERE id = ? AND ST_Contains(ST_PolygonFromText(%s), ST_GeomFromText(%s))`, coordinates.coordinatesToText(), point)
-		err = db.Get(&validatedEstate, query, estate.ID)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				continue
-			} else {
-				c.Echo().Logger.Errorf("db access is failed on executing validate if estate is in polygon : %v", err)
-				return c.NoContent(http.StatusInternalServerError)
-			}
-		} else {
-			estatesInPolygon = append(estatesInPolygon, validatedEstate)
-		}
-	}
-
 	var re EstateSearchResponse
-	re.Estates = []Estate{}
-	if len(estatesInPolygon) > NazotteLimit {
-		re.Estates = estatesInPolygon[:NazotteLimit]
-	} else {
-		re.Estates = estatesInPolygon
-	}
+	re.Estates = estatesInPolygon
 	re.Count = int64(len(re.Estates))
 
 	return c.JSON(http.StatusOK, re)

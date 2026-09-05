@@ -22,6 +22,10 @@ CREATE TABLE isuumo.estate
     -- 生成列を索引する。ORDER BY popularity_desc ASC, id ASC = 人気順。
     popularity_desc INTEGER AS (-popularity) STORED,
 
+    -- latitude / longitude から自動生成する POINT。INSERT 側はカラム未指定のままでよい。
+    -- 空間関数(ST_Contains 等)の引数座標順は coordinatesToText() の "緯度 経度" に合わせる。
+    location    POINT GENERATED ALWAYS AS (POINT(latitude, longitude)) STORED NOT NULL,
+
     -- ORDER BY rent ASC, id ASC を filesort なしで返す(InnoDB は末尾に主キーが暗黙で付く)。
     -- rent >= ? AND rent < ? のレンジ絞り込みと COUNT(*) のカバリングも兼ねる。
     INDEX idx_rent (rent),
@@ -32,7 +36,9 @@ CREATE TABLE isuumo.estate
     -- GET /api/estate/search が件数表示のために毎回投げる COUNT(*) 用。
     -- COUNT には ORDER BY も LIMIT も無く早期打ち切りが効かないので、
     -- 検索に使う3列を全部入れて行本体を読まずに数え切れるようにする。
-    INDEX idx_cover (rent, door_height, door_width)
+    INDEX idx_cover (rent, door_height, door_width),
+    -- なぞって検索の ST_Contains を1クエリで高速化する R-Tree 空間インデックス。
+    SPATIAL INDEX idx_location (location)
 );
 
 CREATE TABLE isuumo.chair
