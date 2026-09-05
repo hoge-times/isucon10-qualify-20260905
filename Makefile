@@ -44,6 +44,9 @@ arestart:
 
 .PHONY: nrestart
 nrestart:
+	# ここは計測用のリセット経路(report.sh reset が叩く)。logoff のまま計測すると
+	# alp が空になって気づけないので、必ずアクセスログを ON に戻してから回す。
+	make nlogon
 	sudo touch /var/log/nginx/access.log
 	sudo rm /var/log/nginx/access.log
 	sudo systemctl reload nginx
@@ -63,6 +66,70 @@ mrestart:
 	echo "set global slow_query_log = 1;" | sudo mysql ${mysql_auth}
 	echo "set global slow_query_log_file = '/var/log/mysql/slow.log';" | sudo mysql ${mysql_auth}
 	echo "set global long_query_time = 0;" | sudo mysql ${mysql_auth}
+
+# ---------------------------------------------------------------------------
+# ログの ON / OFF
+#
+#   make logon   計測用。nginx のアクセスログ(alp)と MySQL のスロークエリログ(pt)を出す
+#   make logoff  本番走行用。全部止めて再起動する。スコアを狙う走行の直前に叩く
+#
+# アプリのエラーログは logoff でも残る(正常系では1行も出ないのでコストは無く、
+# 500 が出たときにこれが無いと切り分けられない)。
+#
+# 注意: make prepare / report.sh は計測用なので、nrestart と mrestart が
+# nginx と MySQL のログを ON に戻す。logoff の状態で走らせたいなら
+# prepare を挟まずに logoff → ベンチの順で叩くこと。
+# ---------------------------------------------------------------------------
+.PHONY: logon logoff
+logon:
+	ssh isucon@${web_host} -A 'cd isuumo/webapp && make nlogon alogon'
+	ssh isucon@${chair_db_host} -A 'cd isuumo/webapp && make mlogon'
+	ssh isucon@${estate_db_host} -A 'cd isuumo/webapp && make mlogon'
+	echo "ログを ON にしました(計測用)"
+
+logoff:
+	ssh isucon@${web_host} -A 'cd isuumo/webapp && make nlogoff alogoff'
+	ssh isucon@${chair_db_host} -A 'cd isuumo/webapp && make mlogoff'
+	ssh isucon@${estate_db_host} -A 'cd isuumo/webapp && make mlogoff'
+	echo "ログを OFF にしました(本番走行用)"
+
+# web ホストで実行。nginx のアクセスログ。
+# nginx.conf は http レベルで access_log off、server ブロックが
+# /etc/nginx/access-log.d/*.conf を include する。on.conf を置くと server レベルで
+# 上書きされて記録が始まる。access-log.d は Git 管理外(実行時に追跡ファイルを
+# 書き換えるとサーバー側の git pull が壊れるため)。
+.PHONY: nlogon nlogoff
+nlogon:
+	sudo mkdir -p /etc/nginx/access-log.d
+	echo 'access_log /var/log/nginx/access.log ltsv;' | sudo tee /etc/nginx/access-log.d/on.conf > /dev/null
+	sudo nginx -t
+	sudo systemctl reload nginx
+
+nlogoff:
+	sudo rm -f /etc/nginx/access-log.d/on.conf
+	sudo nginx -t
+	sudo systemctl reload nginx
+
+# web ホストで実行。アプリのアクセスログ(1リクエスト1行の JSON)。
+# env.sh は isuumo.go.service の EnvironmentFile で Git 管理外なので直接書く。
+.PHONY: alogon alogoff
+alogon:
+	sed -i '/^ISU_ACCESS_LOG=/d' /home/isucon/env.sh
+	echo 'ISU_ACCESS_LOG=1' >> /home/isucon/env.sh
+	make arestart
+
+alogoff:
+	sed -i '/^ISU_ACCESS_LOG=/d' /home/isucon/env.sh
+	make arestart
+
+# DB ホストで実行。スロークエリログ。
+.PHONY: mlogon mlogoff
+mlogon:
+	echo "set global slow_query_log = 1;" | sudo mysql ${mysql_auth}
+	echo "set global long_query_time = 0;" | sudo mysql ${mysql_auth}
+
+mlogoff:
+	echo "set global slow_query_log = 0;" | sudo mysql ${mysql_auth}
 
 # nginx のアクセスログを alp で集計
 .PHONY: nalp

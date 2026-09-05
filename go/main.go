@@ -418,11 +418,23 @@ func validateBucketBoundaries(name string, cond RangeCondition, bounds []int64) 
 func main() {
 	// Echo instance
 	e := echo.New()
-	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
+
+	// アクセスログ(1リクエスト1行の JSON)は journald に流れ、rsyslog にも複製される。
+	// 直近の計測では systemd-journal 6.4% + rsyslogd 5.6% で CPU 12% ぶんを使っており、
+	// web が壁になっている今は無視できない。既定では出さない。
+	//
+	// エラーだけは残す。ここまで切ると 500 が出たときに原因が分からなくなる
+	// (DB 分割のときの Table doesn't exist はこのログで切り分けた)。正常系では
+	// 1行も出ないのでコストはゼロ。
+	e.Debug = false
+	e.Logger.SetLevel(log.ERROR)
+	if getEnv("ISU_ACCESS_LOG", "") != "" {
+		e.Debug = true
+		e.Logger.SetLevel(log.DEBUG)
+		e.Use(middleware.Logger())
+	}
 
 	// Middleware
-	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
 	// Initialize
