@@ -106,11 +106,24 @@ ssh i1 'cd isuumo/bench && ./bench -target-url http://127.0.0.1'
 
 ## ポート構成
 
+初期状態（3 台とも同じフルスタック）:
+
 | 待受 | プロセス |
 |---|---|
 | `0.0.0.0:80` | nginx（リバースプロキシ） |
 | `*:1323` | `isuumo`（アプリ本体） |
 | `127.0.0.1:3306` | mysqld |
+
+**2026-09-05 16:53 以降は役割を分けている**（詳細は [docs/report/server-split.md](report/server-split.md)）。
+
+| ホスト | 役割 | 動いているもの |
+|---|---|---|
+| i1 | **web** | nginx (`0.0.0.0:80`) + `isuumo` (`*:1323`)。mysql は stop + disable |
+| i2 | **MySQL 専有** | mysqld (`0.0.0.0:3306`)。nginx と `isuumo.go.service` は stop + disable |
+| i3 | 不使用 | **別メンバーが使用中。デプロイも設定変更もしない** |
+
+i1 の `/home/isucon/env.sh` は `MYSQL_HOST="172.31.0.196"`（i2 の private IP）を指す。
+alp は i1、pt-query-digest は i2 から採る。
 
 ## ミドルウェア / OS
 

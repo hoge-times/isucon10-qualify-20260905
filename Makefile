@@ -4,18 +4,34 @@ service = isuumo.go.service
 godir = go
 mysql_auth = 
 
+# 構成: i1 = web(nginx + アプリ) / i2 = MySQL 専有 / i3 = 予備
+web_host = i1
+db_host = i2
+
 # ベンチ(練習: i1 で実行 / 本戦: ポータルから)
 .PHONY: bench
 bench:
 	ssh i1 'cd isuumo/bench && ./bench -target-url http://127.0.0.1'
 
-# アプリ、nginx、mysql の再起動
+# ベンチ前の一括準備。ローカルから叩いて web と DB を役割ごとに再起動する。
+.PHONY: prepare
+prepare:
+	ssh isucon@${web_host} -A 'cd isuumo/webapp && make re'
+	ssh isucon@${db_host} -A 'cd isuumo/webapp && make dbre'
+	echo "正常に make prepare が完了しました"
+
+# web ホスト(${web_host})で実行する。アプリと nginx の再起動。
 .PHONY: re
 re:
 	make arestart
 	make nrestart
-	make mrestart
 	echo "正常に make re が完了しました"
+
+# DB ホスト(${db_host})で実行する。MySQL の再起動とスロークエリログの初期化。
+.PHONY: dbre
+dbre:
+	make mrestart
+	echo "正常に make dbre が完了しました"
 
 .PHONY: arestart
 arestart:
@@ -71,6 +87,8 @@ define upload
 	ssh isucon@$(1) 'sudo systemctl status ${service} --no-pager'
 endef
 
+# upload2 / upload3 は現構成では通常使わない。
+# i2 は MySQL 専有なのでアプリを動かしていない。i3 は別メンバーが使用中なので触らないこと。
 .PHONY: upload1 upload2 upload3 all zenbu
 upload1: build
 	$(call upload,i1)
@@ -78,11 +96,11 @@ upload2: build
 	$(call upload,i2)
 upload3: build
 	$(call upload,i3)
-all: upload1 upload2 upload3
+
+# 一括デプロイ。アプリが動くのは web ホスト(${web_host})だけなのでそこにだけ配る。
+all: upload1
 zenbu: all
-	ssh isucon@i1 -A 'cd isuumo/webapp && make re'
-	ssh isucon@i2 -A 'cd isuumo/webapp && make re'
-	ssh isucon@i3 -A 'cd isuumo/webapp && make re'
+	make prepare
 
 .PHONY: pbnalp1 pbnalp2 pbnalp3 pbpt1 pbpt2 pbpt3 pbptselect1 pbptselect2 pbptselect3
 pbnalp1: ; ssh isucon@i1 -A "cd isuumo/webapp && make nalp" | pbcopy
