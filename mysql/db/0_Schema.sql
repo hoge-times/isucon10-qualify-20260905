@@ -68,5 +68,25 @@ CREATE TABLE isuumo.chair
     -- GET /api/chair/search の COUNT(*) 用。estate と同じ理由。
     -- kind / color は VARCHAR(64) だが InnoDB では可変長で格納されるため、
     -- 実データ(kind 4種 / color 12種)なら索引サイズへの影響は小さい。
-    INDEX idx_cover (price, height, width, depth, stock, kind, color)
+    INDEX idx_cover (price, height, width, depth, stock, kind, color),
+
+    -- GET /api/chair/search の SELECT 用。等値条件を先頭に置いた絞り込み索引。
+    --
+    -- 検索は ORDER BY popularity_desc ASC, id ASC LIMIT ? OFFSET ? を持つ。
+    -- オプティマイザは LIMIT があると idx_pop_desc を人気順に辿って早期打ち切り
+    -- する計画を選びがちだが、その見積もりは「条件がすぐ埋まる」前提。条件が
+    -- 厳しいと必要件数が集まらずテーブルをほぼ全部舐める(実測で 33,927 行読んで
+    -- 25 行しか返さない)。
+    --
+    -- idx_cover では防げない。先頭が price のレンジなので絞り込みの見積もりが
+    -- 甘く、オプティマイザは idx_pop_desc を選び続ける。先頭を等値の color / kind
+    -- にすると見積もりが当たり、自分から絞り込み側へ乗り換える。
+    --
+    -- i2 実機での実測(price+height+kind+color、一致 25 件):
+    --   追加前 26.16ms (idx_pop_desc, rows=141, filtered=0.04%)
+    --   追加後  1.55ms (idx_color_price, rows=492, Using index condition)
+    -- 条件が緩いとき(color のみ、一致 2,928 件)は追加後も idx_pop_desc のまま
+    -- 0.28ms で、正しい判断が維持される。
+    INDEX idx_color_price (color, price),
+    INDEX idx_kind_price (kind, price)
 );
