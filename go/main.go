@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
@@ -29,6 +30,85 @@ var db *sqlx.DB
 var mySQLConnectionData *MySQLConnectionEnv
 var chairSearchCondition ChairSearchCondition
 var estateSearchCondition EstateSearchCondition
+
+// ID 引き(SELECT * FROM chair/estate WHERE id = ?)のプロセス内キャッシュ。
+// estate は INSERT しかされないので無効化が不要。chair は buyChair の stock
+// 更新だけが変更点なので、そこでキャッシュを上書きする。
+// 見つからなかった行はキャッシュしない(ネガティブキャッシュを持たない)ため、
+// POST で後から追加された行は次の読み込みで DB から拾われる。
+var (
+	chairCacheMu sync.RWMutex
+	chairCache   = map[int64]Chair{}
+
+	estateCacheMu sync.RWMutex
+	estateCache   = map[int64]Estate{}
+)
+
+// clearIDCaches は /initialize でデータが作り直されたときに全消しする。
+func clearIDCaches() {
+	chairCacheMu.Lock()
+	chairCache = map[int64]Chair{}
+	chairCacheMu.Unlock()
+
+	estateCacheMu.Lock()
+	estateCache = map[int64]Estate{}
+	estateCacheMu.Unlock()
+}
+
+// getChairByID はキャッシュ優先で chair を1件返す。
+// 格納時に既存エントリがあればそちらを採用するのは、DB を読んでいる間に
+// buyChair が新しい stock を書き込んだ場合に、古い値で上書きしないため。
+// これがないと売り切れたイスに 200 を返してしまう。
+func getChairByID(id int64) (Chair, error) {
+	chairCacheMu.RLock()
+	chair, ok := chairCache[id]
+	chairCacheMu.RUnlock()
+	if ok {
+		return chair, nil
+	}
+
+	if err := db.Get(&chair, "SELECT * FROM chair WHERE id = ?", id); err != nil {
+		return Chair{}, err
+	}
+
+	chairCacheMu.Lock()
+	if cached, exists := chairCache[id]; exists {
+		chair = cached
+	} else {
+		chairCache[id] = chair
+	}
+	chairCacheMu.Unlock()
+
+	return chair, nil
+}
+
+// storeChair は buyChair のコミット後に、確定した stock で無条件に上書きする。
+func storeChair(chair Chair) {
+	chairCacheMu.Lock()
+	chairCache[chair.ID] = chair
+	chairCacheMu.Unlock()
+}
+
+// getEstateByID はキャッシュ優先で estate を1件返す。estate は更新されないので
+// 単純に入れっぱなしでよい。
+func getEstateByID(id int64) (Estate, error) {
+	estateCacheMu.RLock()
+	estate, ok := estateCache[id]
+	estateCacheMu.RUnlock()
+	if ok {
+		return estate, nil
+	}
+
+	if err := db.Get(&estate, "SELECT * FROM estate WHERE id = ?", id); err != nil {
+		return Estate{}, err
+	}
+
+	estateCacheMu.Lock()
+	estateCache[id] = estate
+	estateCacheMu.Unlock()
+
+	return estate, nil
+}
 
 type InitializeResponse struct {
 	Language string `json:"language"`
@@ -323,6 +403,8 @@ func initialize(c echo.Context) error {
 		}
 	}
 
+	clearIDCaches()
+
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
 	})
@@ -335,9 +417,7 @@ func getChairDetail(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	chair := Chair{}
-	query := `SELECT * FROM chair WHERE id = ?`
-	err = db.Get(&chair, query, id)
+	chair, err := getChairByID(int64(id))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Echo().Logger.Infof("requested id's chair not found : %v", id)
@@ -594,6 +674,10 @@ func buyChair(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
+	// FOR UPDATE で読んだ値は減算前なので、確定後の stock を書き戻す。
+	chair.Stock--
+	storeChair(chair)
+
 	return c.NoContent(http.StatusOK)
 }
 
@@ -624,8 +708,7 @@ func getEstateDetail(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	var estate Estate
-	err = db.Get(&estate, "SELECT * FROM estate WHERE id = ?", id)
+	estate, err := getEstateByID(int64(id))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Echo().Logger.Infof("getEstateDetail estate id %v not found", id)
@@ -836,9 +919,7 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	chair := Chair{}
-	query := `SELECT * FROM chair WHERE id = ?`
-	err = db.Get(&chair, query, id)
+	chair, err := getChairByID(int64(id))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.Logger().Infof("Requested chair id \"%v\" not found", id)
@@ -854,7 +935,7 @@ func searchRecommendedEstateWithChair(c echo.Context) error {
 	dims := []int64{chair.Width, chair.Height, chair.Depth}
 	sort.Slice(dims, func(i, j int) bool { return dims[i] < dims[j] })
 	d1, d2 := dims[0], dims[1]
-	query = `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?`
+	query := `SELECT * FROM estate WHERE (door_width >= ? AND door_height >= ?) OR (door_width >= ? AND door_height >= ?) ORDER BY popularity_desc ASC, id ASC LIMIT ?`
 	err = db.Select(&estates, query, d1, d2, d2, d1, Limit)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -941,9 +1022,7 @@ func postEstateRequestDocument(c echo.Context) error {
 		return c.NoContent(http.StatusBadRequest)
 	}
 
-	estate := Estate{}
-	query := `SELECT * FROM estate WHERE id = ?`
-	err = db.Get(&estate, query, id)
+	_, err = getEstateByID(int64(id))
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return c.NoContent(http.StatusNotFound)
