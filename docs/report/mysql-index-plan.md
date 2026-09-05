@@ -1,7 +1,7 @@
 # MySQL インデックス設計レポート（Slow クエリログ起点）
 
 対象: `isucon10-qualify-20260905` / ホスト `i1` / 2026-09-05
-入力: [bench Issue #2](https://github.com/hoge-times/isucon10-qualify-20260905/issues/2)（score=1096、pt-query-digest、alp）、[app-map](app-map/README.md)、[US 分析](../us/report.md)
+入力: [bench Issue #2](https://github.com/hoge-times/isucon10-qualify-20260905/issues/2)（score=1096、pt-query-digest、alp）、[app-map](app-map.md)、[US 分析](../us/report.md)
 検証: `i1` 上の MySQL 実機（`EXPLAIN`・行数カウント）、`~/isuumo/bench` のベンチ実装
 
 ---
