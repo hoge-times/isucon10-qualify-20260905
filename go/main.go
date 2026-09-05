@@ -122,6 +122,45 @@ func getEstateByID(id int64) (Estate, error) {
 	return estate, nil
 }
 
+// low_priced のレスポンスは「価格 / 賃料の昇順 TOP20」の固定リストで、1 走行あたり
+// chair / estate それぞれ 15,551 回(全リクエストの 21%、レスポンス本文の 29% =
+// 395MB)呼ばれる。中身が変わる条件は限られるので、エンコード済みの JSON を
+// そのまま持ち回し、DB アクセスと JSON エンコードの両方を省く。
+//
+// 無効化が要るのは次の場合だけ。
+//   - buyChair で stock が 0 になったとき。`stock > 0` から外れて一覧が変わる。
+//     0 にならない購入では Chair.Stock が json:"-" でレスポンスに出ないため、
+//     一覧は 1 バイトも変わらない。
+//   - postChair / postEstate。より安い行が入ると一覧が変わる。
+//   - /initialize。データが作り直される。
+//
+// gen は「DB を読んでいる間に無効化が走らなかったか」を見るための世代番号。
+// 読み終えてから格納するまでに購入がコミットされると古い一覧を書き込んでしまうので、
+// 読み始めた時点の gen と一致するときだけ格納する。
+var (
+	lowPricedChairMu   sync.RWMutex
+	lowPricedChairJSON []byte
+	lowPricedChairGen  uint64
+
+	lowPricedEstateMu   sync.RWMutex
+	lowPricedEstateJSON []byte
+	lowPricedEstateGen  uint64
+)
+
+func invalidateLowPricedChair() {
+	lowPricedChairMu.Lock()
+	lowPricedChairJSON = nil
+	lowPricedChairGen++
+	lowPricedChairMu.Unlock()
+}
+
+func invalidateLowPricedEstate() {
+	lowPricedEstateMu.Lock()
+	lowPricedEstateJSON = nil
+	lowPricedEstateGen++
+	lowPricedEstateMu.Unlock()
+}
+
 type InitializeResponse struct {
 	Language string `json:"language"`
 }
@@ -493,6 +532,8 @@ func initialize(c echo.Context) error {
 	}
 
 	clearIDCaches()
+	invalidateLowPricedChair()
+	invalidateLowPricedEstate()
 
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "go",
@@ -575,6 +616,10 @@ func postChair(c echo.Context) error {
 		c.Logger().Errorf("failed to commit tx: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	// 追加された行が TOP20 より安いかは調べずに捨てる。1 走行で 11 回しか来ない。
+	invalidateLowPricedChair()
+
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -750,6 +795,14 @@ func buyChair(c echo.Context) error {
 	chair.Stock--
 	storeChair(chair)
 
+	// 一覧から外れるのは stock が 0 になった行だけ。減っただけなら Chair.Stock は
+	// json:"-" でレスポンスに出ないので、low_priced の中身は変わらない。
+	// 無効化は必ずコミットの後に行う(前にやると、コミット前の一覧を読んだリクエストが
+	// 無効化の後にキャッシュへ書き戻して古いまま固定されてしまう)。
+	if chair.Stock == 0 {
+		invalidateLowPricedChair()
+	}
+
 	return c.NoContent(http.StatusOK)
 }
 
@@ -758,6 +811,13 @@ func getChairSearchCondition(c echo.Context) error {
 }
 
 func getLowPricedChair(c echo.Context) error {
+	lowPricedChairMu.RLock()
+	cached, gen := lowPricedChairJSON, lowPricedChairGen
+	lowPricedChairMu.RUnlock()
+	if cached != nil {
+		return c.JSONBlob(http.StatusOK, cached)
+	}
+
 	var chairs []Chair
 	query := "SELECT " + chairColumns + " FROM chair WHERE stock > 0 ORDER BY price ASC, id ASC LIMIT ?"
 	err := chairDB.Select(&chairs, query, Limit)
@@ -770,7 +830,19 @@ func getLowPricedChair(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	return c.JSON(http.StatusOK, ChairListResponse{Chairs: chairs})
+	body, err := json.Marshal(ChairListResponse{Chairs: chairs})
+	if err != nil {
+		c.Logger().Errorf("getLowPricedChair marshal error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	lowPricedChairMu.Lock()
+	if lowPricedChairGen == gen {
+		lowPricedChairJSON = body
+	}
+	lowPricedChairMu.Unlock()
+
+	return c.JSONBlob(http.StatusOK, body)
 }
 
 func getEstateDetail(c echo.Context) error {
@@ -858,6 +930,10 @@ func postEstate(c echo.Context) error {
 		c.Logger().Errorf("failed to commit tx: %v", err)
 		return c.NoContent(http.StatusInternalServerError)
 	}
+
+	// estate は更新も削除もされないので、一覧が変わるのはこの INSERT のときだけ。
+	invalidateLowPricedEstate()
+
 	return c.NoContent(http.StatusCreated)
 }
 
@@ -955,6 +1031,13 @@ func searchEstates(c echo.Context) error {
 }
 
 func getLowPricedEstate(c echo.Context) error {
+	lowPricedEstateMu.RLock()
+	cached, gen := lowPricedEstateJSON, lowPricedEstateGen
+	lowPricedEstateMu.RUnlock()
+	if cached != nil {
+		return c.JSONBlob(http.StatusOK, cached)
+	}
+
 	estates := make([]Estate, 0, Limit)
 	query := "SELECT " + estateColumns + " FROM estate ORDER BY rent ASC, id ASC LIMIT ?"
 	err := estateDB.Select(&estates, query, Limit)
@@ -967,7 +1050,19 @@ func getLowPricedEstate(c echo.Context) error {
 		return c.NoContent(http.StatusInternalServerError)
 	}
 
-	return c.JSON(http.StatusOK, EstateListResponse{Estates: estates})
+	body, err := json.Marshal(EstateListResponse{Estates: estates})
+	if err != nil {
+		c.Logger().Errorf("getLowPricedEstate marshal error : %v", err)
+		return c.NoContent(http.StatusInternalServerError)
+	}
+
+	lowPricedEstateMu.Lock()
+	if lowPricedEstateGen == gen {
+		lowPricedEstateJSON = body
+	}
+	lowPricedEstateMu.Unlock()
+
+	return c.JSONBlob(http.StatusOK, body)
 }
 
 func searchRecommendedEstateWithChair(c echo.Context) error {
