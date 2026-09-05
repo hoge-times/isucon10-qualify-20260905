@@ -28,7 +28,11 @@ CREATE TABLE isuumo.estate
     -- なぞって検索の bounding box 用。緯度帯で 32,000 行 -> 約 491 行まで落ちる。
     INDEX idx_lat_lon (latitude, longitude),
     -- 人気順をインデックス順に読ませ、LIMIT で早期打ち切りする。
-    INDEX idx_pop_desc (popularity_desc, id)
+    INDEX idx_pop_desc (popularity_desc, id),
+    -- GET /api/estate/search が件数表示のために毎回投げる COUNT(*) 用。
+    -- COUNT には ORDER BY も LIMIT も無く早期打ち切りが効かないので、
+    -- 検索に使う3列を全部入れて行本体を読まずに数え切れるようにする。
+    INDEX idx_cover (rent, door_height, door_width)
 );
 
 CREATE TABLE isuumo.chair
@@ -54,5 +58,9 @@ CREATE TABLE isuumo.chair
     -- price >= ? AND price < ? のレンジ絞り込みも兼ねる。
     INDEX idx_price (price),
     -- 人気順をインデックス順に読ませ、LIMIT で早期打ち切りする。
-    INDEX idx_pop_desc (popularity_desc, id)
+    INDEX idx_pop_desc (popularity_desc, id),
+    -- GET /api/chair/search の COUNT(*) 用。estate と同じ理由。
+    -- kind / color は VARCHAR(64) だが InnoDB では可変長で格納されるため、
+    -- 実データ(kind 4種 / color 12種)なら索引サイズへの影響は小さい。
+    INDEX idx_cover (price, height, width, depth, stock, kind, color)
 );
